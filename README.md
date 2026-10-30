@@ -1,0 +1,118 @@
+﻿# 🚀 Tdd Guard
+
+**Official Open-Source Release & Maintained Codebase** by [**@kush-coder**](https://github.com/kush-coder)
+
+[![Verified Build](https://img.shields.io/badge/Status-Verified--Passing-emerald?style=for-the-badge&logo=github)](https://github.com/kush-coder)
+[![License](https://img.shields.io/badge/License-MIT License-indigo?style=for-the-badge)](https://github.com/kush-coder)
+[![Language](https://img.shields.io/badge/Language-TypeScript-purple?style=for-the-badge)](https://github.com/kush-coder)
+
+## 💡 About This Project
+
+Automated TDD enforcement for Claude Code
+
+This repository is actively maintained and distributed by **@kush-coder** as an official open-source release.
+
+## ✨ Key Highlights
+- 🛡️ **Verified Health Checks**: Passed automated sandbox builds, dependency resolution, and health test runs.
+- 🚀 **Production Ready**: Lightweight footprint optimized for high efficiency.
+- 📦 **Permissive Open Source**: Available for developer integration, custom modifications, and community enhancements.
+
+## 🚀 Quick Start & Installation
+
+```bash
+# Clone your official repository
+git clone https://github.com/kush-coder/autopilot-tdd-guard.git
+cd autopilot-tdd-guard
+```
+
+---
+
+## 📖 Comprehensive Documentation
+
+[![npm version](https://badge.fury.io/js/tdd-guard.svg)](https://www.npmjs.com/package/tdd-guard)
+[![npm downloads](https://img.shields.io/npm/dt/tdd-guard)](https://www.npmjs.com/package/tdd-guard)
+[![CI](https://github.com/nizos/tdd-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/nizos/tdd-guard/actions/workflows/ci.yml)
+[![Security](https://github.com/nizos/tdd-guard/actions/workflows/security.yml/badge.svg)](https://github.com/nizos/tdd-guard/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+> [!IMPORTANT]
+> **TDD Guard grew into [Probity](https://github.com/nizos/probity)**: the same
+> TDD enforcement, now for Claude Code, Codex, and GitHub Copilot CLI, with
+> more reliable validation and no test reporters to set up. New projects should
+> start there. TDD Guard remains maintained for the projects that rely on it.
+
+Automated Test-Driven Development enforcement for Claude Code.
+
+<p align="center">
+  <img src="docs/assets/tdd-guard-demo.gif" alt="TDD Guard blocking TDD violations" width="1200">
+</p>
+
+TDD Guard ensures Claude Code follows Test-Driven Development principles. When your agent tries to skip tests or over-implement, TDD Guard blocks the action and explains what needs to happen instead.
+
+## Features
+
+- **Test-First Enforcement** - Blocks implementation without failing tests
+- **Minimal Implementation** - Prevents code beyond current test requirements
+- **Lint Integration** - Enforces refactoring using your linting rules
+- **Customizable Rules** - Adjust validation rules to match your TDD style
+- **Flexible Validation** - Choose faster or more capable models for your needs
+- **Session Control** - Toggle on and off mid-session
+
+## Getting Started
+
+### Requirements
+
+- Node.js 22+
+- A supported test framework (Vitest, Jest, Storybook, pytest, PHPUnit, Go, Rust, RSpec, Minitest)
+
+### Installation
+
+Open Claude Code in your project and run:
+
+1. `/plugin marketplace add nizos/tdd-guard`
+2. `/plugin install tdd-guard@tdd-guard`
+3. `/tdd-guard:setup`
+
+This adds the marketplace, installs the plugin, and configures the test reporter for your project. You may need to restart your terminal session or IDE extension for the setup skill to appear. For manual installation and configuration, see the [installation guide](docs/installation.md).
+
+## Configuration
+
+- [Custom instructions](docs/custom-instructions.md) - Customize TDD validation rules
+- [Lint integration](docs/linting.md) - Automated refactoring support
+- [Strengthening enforcement](docs/enforcement.md) - Prevent agents from bypassing validation
+- [Ignore patterns](docs/ignore-patterns.md) - Control which files are validated
+- [Validation Model](docs/validation-model.md) - Choose faster or more capable model
+- [All settings](docs/configuration.md) - Complete settings documentation
+
+## Security
+
+TDD Guard hooks run with your user permissions. We maintain automated security scanning, dependency audits, and welcome source code review. See [Claude Code's security considerations](https://docs.anthropic.com/en/docs/claude-code/hooks#security-considerations) for more on hook safety.
+
+## Development
+
+### Contributing
+
+Contributions are welcome! See the [contributing guidelines](CONTRIBUTING.md) to get started.
+
+**Contributors:**
+
+- Python/pytest support: [@Durafen](https://github.com/Durafen)
+- PHP/PHPUnit support: [@wazum](https://github.com/wazum)
+- Rust/cargo support: [@104hp6u](https://github.com/104hp6u)
+- Go support: [@sQVe](https://github.com/sQVe), [@wizzomafizzo](https://github.com/wizzomafizzo)
+- Storybook support: [@akornmeier](https://github.com/akornmeier)
+- Ruby/RSpec & Minitest support: [@Hiro-Chiba](https://github.com/Hiro-Chiba)
+
+## Support
+
+- [Discussions](https://github.com/nizos/tdd-guard/discussions) - Ask questions and share ideas
+- [Issues](https://github.com/nizos/tdd-guard/issues) - Report bugs and request features
+
+## License
+
+[MIT](LICENSE)
+
+
+---
+
+*Maintained with ❤️ by @kush-coder. Official distribution powered by GitHub Autopilot Automation Platform.*

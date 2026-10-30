@@ -1,0 +1,14 @@
+export const TEST_OUTPUT = `### Test Output
+
+This section shows the output from the most recent test run BEFORE this modification.
+
+IMPORTANT: This test output is from PREVIOUS work, not from the changes being reviewed. The modification has NOT been executed yet.
+
+Use this to understand:
+- Which tests are failing and why (from previous work)
+- What error messages indicate about missing implementation
+- Whether tests are passing (indicating refactor phase may be appropriate)
+
+Note: Test output reflects PREVIOUS work and may be stale or from unrelated features. It does NOT prevent starting new test-driven work. In particular, passing (green) output does not restrict the change to refactoring. Adding ONE new test is always allowed.
+
+`

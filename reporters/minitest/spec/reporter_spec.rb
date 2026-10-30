@@ -1,0 +1,1092 @@
+# frozen_string_literal: true
+
+require "spec_helper"
+require "helpers"
+require "json"
+require "tmpdir"
+require "fileutils"
+
+RSpec.describe TddGuardMinitest::Reporter do
+  include TddGuardMinitestHelpers
+
+  let(:default_data_dir) { TddGuardMinitest::Reporter::DEFAULT_DATA_DIR }
+
+  # Helper: create a reporter with storage_dir pointing to a tmpdir
+  def create_reporter_in(tmpdir)
+    real_tmpdir = File.realpath(tmpdir)
+    Dir.chdir(real_tmpdir) do
+      ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => real_tmpdir) do
+        reporter = described_class.new(StringIO.new)
+        yield reporter, real_tmpdir
+      end
+    end
+  end
+
+  # Helper: run the full flow and return parsed JSON
+  def run_and_read_json(reporter, storage_dir)
+    reporter.report
+    json_path = File.join(storage_dir, default_data_dir, "test.json")
+    JSON.parse(File.read(json_path))
+  end
+
+  # Helper: extract flat list of tests from JSON data
+  def all_tests(data)
+    data["testModules"].flat_map { |m| m["tests"] }
+  end
+
+  describe "#record" do
+    it "captures passed test result" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          result = build_result(
+            name: "test_does_something",
+            klass: "MyClassTest",
+            source_location: ["./test/my_class_test.rb", 5]
+          )
+          reporter.record(result)
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests.length).to eq(1)
+          expect(tests[0]).to eq(
+            "name" => "test_does_something",
+            "fullName" => "test/my_class_test.rb::MyClassTest#test_does_something",
+            "state" => "passed"
+          )
+        end
+      end
+    end
+
+    it "captures failed test result with error message" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(message: "Expected: 6\n  Actual: 5")
+          result = build_result(
+            name: "test_raises_error",
+            klass: "MyClassTest",
+            source_location: ["./test/my_class_test.rb", 10],
+            failures: [failure]
+          )
+          reporter.record(result)
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests.length).to eq(1)
+          expect(tests[0]["name"]).to eq("test_raises_error")
+          expect(tests[0]["state"]).to eq("failed")
+          expect(tests[0]["errors"][0]["message"]).to eq("Expected: 6\n  Actual: 5")
+        end
+      end
+    end
+
+    it "captures skipped test" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          skip_failure = build_skip(message: "not implemented yet")
+          result = build_result(
+            name: "test_is_pending",
+            klass: "MyClassTest",
+            source_location: ["./test/my_class_test.rb", 15],
+            failures: [skip_failure]
+          )
+          reporter.record(result)
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests.length).to eq(1)
+          expect(tests[0]["state"]).to eq("skipped")
+        end
+      end
+    end
+  end
+
+  describe "#report" do
+    it "saves empty testModules when no tests ran" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["testModules"]).to eq([])
+          expect(data["reason"]).to eq("passed")
+        end
+      end
+    end
+
+    it "saves results grouped by module to JSON" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          [
+            { name: "test_one", klass: "ModelTest", file: "test/model_test.rb", failures: [] },
+            { name: "test_two", klass: "ModelTest", file: "test/model_test.rb",
+              failures: [build_assertion_failure(message: "Error")] },
+            { name: "test_other", klass: "ServiceTest", file: "test/service_test.rb", failures: [] }
+          ].each do |t|
+            result = build_result(
+              name: t[:name],
+              klass: t[:klass],
+              source_location: [t[:file], 5],
+              failures: t[:failures]
+            )
+            reporter.record(result)
+          end
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["testModules"].length).to eq(2)
+
+          model_module = data["testModules"].find { |m| m["moduleId"] == "test/model_test.rb" }
+          expect(model_module["tests"].length).to eq(2)
+          expect(model_module["tests"][0]["name"]).to eq("test_one")
+
+          service_module = data["testModules"].find { |m| m["moduleId"] == "test/service_test.rb" }
+          expect(service_module["tests"].length).to eq(1)
+          expect(service_module["tests"][0]["name"]).to eq("test_other")
+        end
+      end
+    end
+  end
+
+  describe "reason field" do
+    it "reports passed when all tests pass" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          %w[test_one test_two].each do |name|
+            reporter.record(
+              build_result(
+                name: name,
+                klass: "MyClassTest",
+                source_location: ["./test/my_class_test.rb", 5]
+              )
+            )
+          end
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["reason"]).to eq("passed")
+        end
+      end
+    end
+
+    it "reports failed when one test fails" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.record(
+            build_result(
+              name: "test_passes",
+              klass: "MyClassTest",
+              source_location: ["./test/my_class_test.rb", 5]
+            )
+          )
+          reporter.record(
+            build_result(
+              name: "test_fails",
+              klass: "MyClassTest",
+              source_location: ["./test/my_class_test.rb", 10],
+              failures: [build_assertion_failure(message: "expected true")]
+            )
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["reason"]).to eq("failed")
+        end
+      end
+    end
+
+    it "reports failed when all tests fail" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          %w[test_one test_two].each do |name|
+            reporter.record(
+              build_result(
+                name: name,
+                klass: "MyClassTest",
+                source_location: ["./test/my_class_test.rb", 5],
+                failures: [build_assertion_failure(message: "error")]
+              )
+            )
+          end
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["reason"]).to eq("failed")
+        end
+      end
+    end
+
+    it "reports interrupted when fewer results than expected" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.instance_variable_set(:@expected_count, 5)
+
+          %w[test_one test_two].each do |name|
+            reporter.record(
+              build_result(
+                name: name,
+                klass: "MyClassTest",
+                source_location: ["./test/my_class_test.rb", 5]
+              )
+            )
+          end
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["reason"]).to eq("interrupted")
+        end
+      end
+    end
+
+    it "reports failed not interrupted when failures exist with fewer results" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.instance_variable_set(:@expected_count, 5)
+
+          reporter.record(
+            build_result(
+              name: "test_passes",
+              klass: "MyClassTest",
+              source_location: ["./test/my_class_test.rb", 5]
+            )
+          )
+          reporter.record(
+            build_result(
+              name: "test_fails",
+              klass: "MyClassTest",
+              source_location: ["./test/my_class_test.rb", 10],
+              failures: [build_assertion_failure(message: "expected true")]
+            )
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["reason"]).to eq("failed")
+        end
+      end
+    end
+
+    it "reports passed when all expected tests complete" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.instance_variable_set(:@expected_count, 2)
+
+          %w[test_one test_two].each do |name|
+            reporter.record(
+              build_result(
+                name: name,
+                klass: "MyClassTest",
+                source_location: ["./test/my_class_test.rb", 5]
+              )
+            )
+          end
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["reason"]).to eq("passed")
+        end
+      end
+    end
+
+    it "reports passed when expected count is zero" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.instance_variable_set(:@expected_count, 0)
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(data["reason"]).to eq("passed")
+        end
+      end
+    end
+
+    describe "compute_expected_count" do
+      it "returns zero when filter is a Proc (so a Rails proc-style filter is not flagged as interrupted)" do
+        Dir.mktmpdir do |tmpdir|
+          create_reporter_in(tmpdir) do |reporter, _|
+            reporter.options[:filter] = ->(_method_name) { true }
+            expect(reporter.send(:compute_expected_count)).to eq(0)
+          end
+        end
+      end
+
+      it "returns zero when test_files contain a line-number entry (Rails `path:N`)" do
+        Dir.mktmpdir do |tmpdir|
+          create_reporter_in(tmpdir) do |reporter, _|
+            reporter.options[:test_files] = ["test/foo_test.rb:8"]
+            expect(reporter.send(:compute_expected_count)).to eq(0)
+          end
+        end
+      end
+
+      it "does not short-circuit when test_files have no line numbers" do
+        Dir.mktmpdir do |tmpdir|
+          create_reporter_in(tmpdir) do |reporter, _|
+            reporter.options[:test_files] = ["test/foo_test.rb"]
+            expect(reporter.send(:line_targeted?, reporter.options[:test_files]))
+              .to be false
+          end
+        end
+      end
+
+      it "detects line-number entries with line_targeted?" do
+        Dir.mktmpdir do |tmpdir|
+          create_reporter_in(tmpdir) do |reporter, _|
+            expect(reporter.send(:line_targeted?, ["test/foo_test.rb:8"])).to be true
+            expect(reporter.send(:line_targeted?, ["test/foo_test.rb:8", "test/bar_test.rb"])).to be true
+            expect(reporter.send(:line_targeted?, ["test/foo_test.rb"])).to be false
+            expect(reporter.send(:line_targeted?, [])).to be false
+            expect(reporter.send(:line_targeted?, nil)).to be false
+          end
+        end
+      end
+    end
+  end
+
+  describe "stack field" do
+    it "includes first relevant test line from backtrace" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(
+            message: "expected true",
+            backtrace: [
+              "./test/my_class_test.rb:5:in `block (2 levels) in <top (required)>'",
+              "/path/to/gems/minitest-5.27.0/lib/minitest/test.rb:98:in `instance_exec'"
+            ]
+          )
+          reporter.record(
+            build_result(name: "test_fails", klass: "MyClassTest",
+                         source_location: ["./test/my_class_test.rb", 5],
+                         failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests[0]["errors"][0]["stack"]).to eq("test/my_class_test.rb:5:in `block (2 levels) in <top (required)>'")
+        end
+      end
+    end
+
+    it "excludes stack when backtrace contains only gem frames" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(
+            message: "expected true",
+            backtrace: [
+              "/path/to/gems/minitest-5.27.0/lib/minitest/test.rb:98:in `instance_exec'",
+              "/path/to/gems/minitest-5.27.0/lib/minitest/runner.rb:121:in `run_specs'"
+            ]
+          )
+          reporter.record(
+            build_result(name: "test_fails", klass: "MyClassTest", failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests[0]["errors"][0]).not_to have_key("stack")
+        end
+      end
+    end
+
+    it "excludes stack when backtrace is nil" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(message: "expected true")
+          reporter.record(
+            build_result(name: "test_fails", klass: "MyClassTest", failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests[0]["errors"][0]).not_to have_key("stack")
+        end
+      end
+    end
+
+    it "strips leading ./ from stack frame" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(
+            message: "error",
+            backtrace: ["./test/foo_test.rb:10:in `block'"]
+          )
+          reporter.record(
+            build_result(name: "test_fails", klass: "FooTest", failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests[0]["errors"][0]["stack"]).to start_with("test/foo_test.rb")
+        end
+      end
+    end
+
+    it "extracts test line from absolute path backtrace" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(
+            message: "error",
+            backtrace: [
+              "/path/to/gems/minitest-5.27.0/lib/minitest.rb:110:in `block'",
+              "/private/tmp/my-project/test/calc_test.rb:3:in `block (2 levels) in <top (required)>'"
+            ]
+          )
+          reporter.record(
+            build_result(name: "test_fails", klass: "CalcTest", failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests[0]["errors"][0]["stack"]).to eq("test/calc_test.rb:3:in `block (2 levels) in <top (required)>'")
+        end
+      end
+    end
+
+    it "unwraps UnexpectedError to use original exception message and backtrace" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          unexpected = build_unexpected_error(
+            error_class: RuntimeError,
+            message: "something broke",
+            backtrace: [
+              "./test/widget_test.rb:8:in `test_boom'",
+              "/path/to/gems/minitest-5.27.0/lib/minitest/test.rb:98:in `run'"
+            ]
+          )
+          reporter.record(
+            build_result(name: "test_boom", klass: "WidgetTest",
+                         source_location: ["./test/widget_test.rb", 8],
+                         failures: [unexpected])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          error = tests[0]["errors"][0]
+          expect(error["message"]).to eq("something broke")
+          expect(error["stack"]).to eq("test/widget_test.rb:8:in `test_boom'")
+        end
+      end
+    end
+  end
+
+  describe "non-utf-8 message handling" do
+    it "scrubs binary (ASCII-8BIT) bytes from a failure message" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(message: "binary: \xff\xfe".b)
+          reporter.record(
+            build_result(name: "test_with_binary", klass: "BinaryTest",
+                         source_location: ["./test/binary_test.rb", 5],
+                         failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests.length).to eq(1)
+          expect(tests[0]["state"]).to eq("failed")
+          expect(tests[0]["errors"][0]["message"]).to start_with("binary: ")
+        end
+      end
+    end
+
+    it "preserves valid UTF-8 (including Japanese) unchanged" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(message: "失敗しました")
+          reporter.record(
+            build_result(name: "test_japanese", klass: "JaTest",
+                         source_location: ["./test/ja_test.rb", 5],
+                         failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests[0]["errors"][0]["message"]).to eq("失敗しました")
+        end
+      end
+    end
+
+    it "transcodes Shift_JIS messages to UTF-8" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          failure = build_assertion_failure(message: "失敗".encode("Shift_JIS"))
+          reporter.record(
+            build_result(name: "test_sjis", klass: "SjisTest",
+                         source_location: ["./test/sjis_test.rb", 5],
+                         failures: [failure])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests[0]["errors"][0]["message"]).to eq("失敗")
+        end
+      end
+    end
+
+    it "preserves other tests in the same run when one has a non-utf-8 message" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.record(
+            build_result(name: "test_pass_one", klass: "MixTest",
+                         source_location: ["./test/mix_test.rb", 1])
+          )
+          reporter.record(
+            build_result(name: "test_binary_fail", klass: "MixTest",
+                         source_location: ["./test/mix_test.rb", 5],
+                         failures: [build_assertion_failure(message: "\xff\xfe".b)])
+          )
+          reporter.record(
+            build_result(name: "test_pass_two", klass: "MixTest",
+                         source_location: ["./test/mix_test.rb", 9])
+          )
+
+          data = run_and_read_json(reporter, storage_dir)
+          tests = all_tests(data)
+          expect(tests.length).to eq(3)
+          states = tests.map { |t| t["state"] }
+          expect(states).to contain_exactly("passed", "passed", "failed")
+        end
+      end
+    end
+  end
+
+  describe "name extraction" do
+    it "uses result.name as name" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          result = build_result(name: "test_returns_correct_value")
+          reporter.record(result)
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(all_tests(data)[0]["name"]).to eq("test_returns_correct_value")
+        end
+      end
+    end
+  end
+
+  describe "fullName format" do
+    it "uses file_path::klass#name as fullName" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          result = build_result(
+            name: "test_works",
+            klass: "WidgetTest",
+            source_location: ["./test/widget_test.rb", 5]
+          )
+          reporter.record(result)
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(all_tests(data)[0]["fullName"]).to eq("test/widget_test.rb::WidgetTest#test_works")
+        end
+      end
+    end
+  end
+
+  describe "path handling" do
+    it "strips leading ./ from file path" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          result = build_result(source_location: ["./test/foo_test.rb", 5])
+          reporter.record(result)
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(all_tests(data)[0]["fullName"]).to start_with("test/foo_test.rb")
+        end
+      end
+    end
+
+    it "handles file path without leading ./" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          result = build_result(source_location: ["test/bar_test.rb", 5])
+          reporter.record(result)
+
+          data = run_and_read_json(reporter, storage_dir)
+          expect(all_tests(data)[0]["fullName"]).to start_with("test/bar_test.rb::")
+        end
+      end
+    end
+  end
+
+  describe "storage directory determination" do
+    it "raises when no env var is set" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.chdir(real_tmpdir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => nil) do
+            expect { described_class.new(StringIO.new) }
+              .to raise_error(ArgumentError, /must be configured via TDD_GUARD_PROJECT_ROOT/)
+          end
+        end
+      end
+    end
+
+    it "raises when env var is empty" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.chdir(real_tmpdir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => "") do
+            expect { described_class.new(StringIO.new) }
+              .to raise_error(ArgumentError, /must be configured via TDD_GUARD_PROJECT_ROOT/)
+          end
+        end
+      end
+    end
+
+    it "accepts a relative path" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.chdir(real_tmpdir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => ".") do
+            reporter = described_class.new(StringIO.new)
+            reporter.report
+
+            json_path = File.join(real_tmpdir, default_data_dir, "test.json")
+            expect(File.exist?(json_path)).to be true
+          end
+        end
+      end
+    end
+
+    it "accepts a path containing .." do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        sub_dir = File.join(real_tmpdir, "sub")
+        FileUtils.mkdir_p(sub_dir)
+        Dir.chdir(sub_dir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => "../") do
+            reporter = described_class.new(StringIO.new)
+            reporter.report
+
+            json_path = File.join(real_tmpdir, default_data_dir, "test.json")
+            expect(File.exist?(json_path)).to be true
+          end
+        end
+      end
+    end
+
+    it "raises when cwd is outside the project root" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.mktmpdir do |outside_dir|
+          real_outside = File.realpath(outside_dir)
+          Dir.chdir(real_tmpdir) do
+            ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => real_outside) do
+              expect { described_class.new(StringIO.new) }
+                .to raise_error(ArgumentError, /current directory must be within project root/)
+            end
+          end
+        end
+      end
+    end
+
+    it "raises with a path-identifying error when project root does not exist" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.chdir(real_tmpdir) do
+          missing = File.join(real_tmpdir, "does", "not", "exist")
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => missing) do
+            expect { described_class.new(StringIO.new) }
+              .to raise_error(ArgumentError) do |err|
+                expect(err.message).to include("project root does not exist")
+                expect(err.message).to include(missing)
+              end
+          end
+        end
+      end
+    end
+
+    it "resolves storage dir correctly when project root and cwd differ via symlink" do
+      Dir.mktmpdir do |tmpdir|
+        real_outer = File.realpath(tmpdir)
+        real_root = File.join(real_outer, "real_root")
+        FileUtils.mkdir_p(real_root)
+        symlink_root = File.join(real_outer, "sym_root")
+        File.symlink(real_root, symlink_root)
+
+        # cwd reaches the project via the symlink while the env var points
+        # at the canonical real path. canonical_path on both sides should
+        # converge to real_root so cwd_within? still recognises the match.
+        Dir.chdir(symlink_root) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => real_root) do
+            reporter = described_class.new(StringIO.new)
+            reporter.report
+
+            json_path = File.join(real_root, default_data_dir, "test.json")
+            expect(File.exist?(json_path)).to be true
+          end
+        end
+      end
+    end
+
+    it "raises when project root is a prefix of cwd but not an ancestor" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        project_dir = File.join(real_tmpdir, "foo")
+        similar_dir = File.join(real_tmpdir, "foobar")
+        FileUtils.mkdir_p(project_dir)
+        FileUtils.mkdir_p(similar_dir)
+
+        Dir.chdir(similar_dir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => project_dir) do
+            expect { described_class.new(StringIO.new) }
+              .to raise_error(ArgumentError, /current directory must be within project root/)
+          end
+        end
+      end
+    end
+
+    it "uses project root from env var when valid" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.chdir(real_tmpdir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => real_tmpdir) do
+            reporter = described_class.new(StringIO.new)
+            reporter.report
+
+            json_path = File.join(real_tmpdir, default_data_dir, "test.json")
+            expect(File.exist?(json_path)).to be true
+          end
+        end
+      end
+    end
+  end
+
+  describe "unhandledErrors field" do
+    it "builds an unhandled error with name, message, and stack" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.record(build_result(name: "test_passes"))
+          reporter.report
+
+          exc = RuntimeError.new("cleanup failed")
+          exc.set_backtrace([
+            "./test/my_class_test.rb:4:in `block (2 levels) in <top (required)>'",
+            "/path/to/gems/minitest-5.27.0/lib/minitest.rb:10:in `run'"
+          ])
+          reporter.append_unhandled_errors([exc])
+
+          data = JSON.parse(File.read(File.join(storage_dir, default_data_dir, "test.json")))
+          expect(data).to have_key("unhandledErrors")
+          expect(data["unhandledErrors"].length).to eq(1)
+
+          entry = data["unhandledErrors"][0]
+          expect(entry["name"]).to eq("RuntimeError")
+          expect(entry["message"]).to eq("cleanup failed")
+          expect(entry["stack"]).to eq("test/my_class_test.rb:4:in `block (2 levels) in <top (required)>'")
+        end
+      end
+    end
+
+    it "handles namespaced exception class" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.report
+
+          mod = Module.new
+          # Define a named class inside the module for class.name to work
+          stub_const("MyApp::DatabaseError", Class.new(StandardError))
+          exc = MyApp::DatabaseError.new("connection lost")
+          exc.set_backtrace(["./test/db_test.rb:10:in `test_query'"])
+          reporter.append_unhandled_errors([exc])
+
+          data = JSON.parse(File.read(File.join(storage_dir, default_data_dir, "test.json")))
+          expect(data["unhandledErrors"][0]["name"]).to eq("MyApp::DatabaseError")
+        end
+      end
+    end
+
+    it "falls back to anonymous name when exception class has no name" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.report
+
+          anon_class = Class.new(StandardError)
+          exc = anon_class.new("anonymous failure")
+          exc.set_backtrace(["./test/anon_test.rb:5:in `test_it'"])
+          reporter.append_unhandled_errors([exc])
+
+          data = JSON.parse(File.read(File.join(storage_dir, default_data_dir, "test.json")))
+          expect(data["unhandledErrors"][0]["name"]).to eq("(anonymous error class)")
+        end
+      end
+    end
+
+    it "omits stack when backtrace is nil" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.report
+
+          exc = RuntimeError.new("no trace")
+          reporter.append_unhandled_errors([exc])
+
+          data = JSON.parse(File.read(File.join(storage_dir, default_data_dir, "test.json")))
+          expect(data["unhandledErrors"][0]).not_to have_key("stack")
+        end
+      end
+    end
+
+    it "omits stack when backtrace has only gem frames" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.report
+
+          exc = RuntimeError.new("gem-only trace")
+          exc.set_backtrace([
+            "/path/to/gems/minitest-5.27.0/lib/minitest.rb:10:in `run'"
+          ])
+          reporter.append_unhandled_errors([exc])
+
+          data = JSON.parse(File.read(File.join(storage_dir, default_data_dir, "test.json")))
+          expect(data["unhandledErrors"][0]).not_to have_key("stack")
+        end
+      end
+    end
+
+    it "writes all errors when given multiple exceptions" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.report
+
+          errors = %w[first second].map do |msg|
+            exc = RuntimeError.new(msg)
+            exc.set_backtrace(["./test/multi_test.rb:3:in `test_it'"])
+            exc
+          end
+          reporter.append_unhandled_errors(errors)
+
+          data = JSON.parse(File.read(File.join(storage_dir, default_data_dir, "test.json")))
+          expect(data["unhandledErrors"].length).to eq(2)
+          expect(data["unhandledErrors"][0]["message"]).to eq("first")
+          expect(data["unhandledErrors"][1]["message"]).to eq("second")
+        end
+      end
+    end
+
+    it "does not add unhandledErrors key when no errors exist" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          reporter.record(build_result(name: "test_passes"))
+          data = run_and_read_json(reporter, storage_dir)
+
+          expect(data).not_to have_key("unhandledErrors")
+        end
+      end
+    end
+
+    it "does not patch test.json when it does not exist" do
+      Dir.mktmpdir do |tmpdir|
+        create_reporter_in(tmpdir) do |reporter, storage_dir|
+          # Do not call report, so test.json does not exist
+          exc = RuntimeError.new("orphan error")
+          reporter.append_unhandled_errors([exc])
+
+          json_path = File.join(storage_dir, default_data_dir, "test.json")
+          expect(File.exist?(json_path)).to be false
+        end
+      end
+    end
+  end
+
+  describe ".handle_load_error" do
+    before { TddGuardMinitest.reported = false }
+    after  { TddGuardMinitest.reported = false }
+
+    # Helper: run handle_load_error in an isolated tmpdir and return parsed JSON
+    def run_handle_load_error_in(tmpdir, exception)
+      real_tmpdir = File.realpath(tmpdir)
+      Dir.chdir(real_tmpdir) do
+        ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => real_tmpdir) do
+          described_class.handle_load_error(exception)
+          json_path = File.join(real_tmpdir, default_data_dir, "test.json")
+          JSON.parse(File.read(json_path))
+        end
+      end
+    end
+
+    # Helper: build a LoadError with a synthetic backtrace
+    def build_load_error(message:, backtrace:)
+      err = LoadError.new(message)
+      err.set_backtrace(backtrace)
+      err
+    end
+
+    it "writes a synthetic failed test module" do
+      Dir.mktmpdir do |tmpdir|
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: ["./test/my_class_test.rb:3:in `require'"]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        tests = data["testModules"].flat_map { |m| m["tests"] }
+        expect(tests.length).to eq(1)
+        expect(tests[0]["state"]).to eq("failed")
+      end
+    end
+
+    it "extracts file path from the first user-land backtrace frame" do
+      Dir.mktmpdir do |tmpdir|
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: [
+            "/path/to/gems/bundler-2.0/lib/bundler/runtime.rb:10:in `require'",
+            "./test/my_class_test.rb:3:in `require'",
+            "./test/my_class_test.rb:3:in `<top (required)>'"
+          ]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        expect(data["testModules"][0]["moduleId"]).to eq("test/my_class_test.rb")
+      end
+    end
+
+    it "strips the cwd prefix from absolute backtrace paths so moduleId is relative" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        absolute_frame = "#{real_tmpdir}/test/my_class_test.rb:3:in `require'"
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: [absolute_frame]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        expect(data["testModules"][0]["moduleId"]).to eq("test/my_class_test.rb")
+      end
+    end
+
+    it "strips the cwd prefix from absolute backtrace frames embedded in the error message" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        absolute_frame = "#{real_tmpdir}/test/my_class_test.rb:3:in `<top (required)>'"
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: [absolute_frame]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        message = data["testModules"][0]["tests"][0]["errors"][0]["message"]
+        expect(message).to include("test/my_class_test.rb:3:in `<top (required)>'")
+        expect(message).not_to include(real_tmpdir)
+      end
+    end
+
+    it "uses exception class and message as the test name" do
+      Dir.mktmpdir do |tmpdir|
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: ["./test/my_class_test.rb:3:in `require'"]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        tests = data["testModules"].flat_map { |m| m["tests"] }
+        expect(tests[0]["name"]).to eq("LoadError: cannot load such file -- my_class")
+        expect(tests[0]["fullName"]).to eq("test/my_class_test.rb::LoadError: cannot load such file -- my_class")
+      end
+    end
+
+    it "includes the class, message, and backtrace frame in the errors entry" do
+      Dir.mktmpdir do |tmpdir|
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: ["./test/my_class_test.rb:3:in `<top (required)>'"]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        tests = data["testModules"].flat_map { |m| m["tests"] }
+        error_msg = tests[0]["errors"][0]["message"]
+        expect(error_msg).to include("LoadError")
+        expect(error_msg).to include("cannot load such file -- my_class")
+        expect(error_msg).to include("test/my_class_test.rb")
+      end
+    end
+
+    it "emits reason: failed" do
+      Dir.mktmpdir do |tmpdir|
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: ["./test/my_class_test.rb:3:in `require'"]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        expect(data["reason"]).to eq("failed")
+      end
+    end
+
+    it "falls back to 'unknown' module when backtrace has only gem frames" do
+      Dir.mktmpdir do |tmpdir|
+        exc = build_load_error(
+          message: "cannot load such file -- my_class",
+          backtrace: [
+            "/path/to/gems/bundler-2.0/lib/bundler/runtime.rb:10:in `require'",
+            "/path/to/gems/minitest-5.27.0/lib/minitest.rb:5:in `require'"
+          ]
+        )
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        expect(data["testModules"][0]["moduleId"]).to eq("unknown")
+      end
+    end
+
+    it "falls back to 'unknown' module when backtrace is nil" do
+      Dir.mktmpdir do |tmpdir|
+        exc = LoadError.new("cannot load such file -- my_class")
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        expect(data["testModules"][0]["moduleId"]).to eq("unknown")
+      end
+    end
+
+    it "accepts any Exception subclass (not just LoadError)" do
+      Dir.mktmpdir do |tmpdir|
+        exc = RuntimeError.new("something else went wrong")
+        exc.set_backtrace(["./test/boom_test.rb:5:in `<top (required)>'"])
+        data = run_handle_load_error_in(tmpdir, exc)
+
+        tests = data["testModules"].flat_map { |m| m["tests"] }
+        expect(tests[0]["name"]).to eq("RuntimeError: something else went wrong")
+        expect(data["testModules"][0]["moduleId"]).to eq("test/boom_test.rb")
+      end
+    end
+
+    it "overwrites a stale test.json left behind by a previous process" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.chdir(real_tmpdir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => real_tmpdir) do
+            json_path = File.join(real_tmpdir, default_data_dir, "test.json")
+            FileUtils.mkdir_p(File.dirname(json_path))
+            File.write(json_path, '{"testModules":[],"reason":"passed"}')
+
+            exc = build_load_error(
+              message: "cannot load such file -- my_class",
+              backtrace: ["./test/my_class_test.rb:3:in `require'"]
+            )
+            described_class.handle_load_error(exc)
+
+            data = JSON.parse(File.read(json_path))
+            expect(data["reason"]).to eq("failed")
+            expect(data["testModules"][0]["moduleId"]).to eq("test/my_class_test.rb")
+          end
+        end
+      end
+    end
+
+    it "does not overwrite test.json after report has run in this process" do
+      Dir.mktmpdir do |tmpdir|
+        real_tmpdir = File.realpath(tmpdir)
+        Dir.chdir(real_tmpdir) do
+          ClimateControl.modify("TDD_GUARD_PROJECT_ROOT" => real_tmpdir) do
+            reporter = described_class.new(StringIO.new)
+            reporter.record(
+              build_result(name: "test_passes", klass: "MyTest",
+                           source_location: ["./test/my_test.rb", 5])
+            )
+            reporter.report  # sets the in-process flag
+
+            exc = build_load_error(
+              message: "cannot load such file -- my_class",
+              backtrace: ["./test/my_class_test.rb:3:in `require'"]
+            )
+            described_class.handle_load_error(exc)
+
+            json_path = File.join(real_tmpdir, default_data_dir, "test.json")
+            data = JSON.parse(File.read(json_path))
+            tests = data["testModules"].flat_map { |m| m["tests"] }
+            expect(tests.length).to eq(1)
+            expect(tests[0]["name"]).to eq("test_passes")
+          end
+        end
+      end
+    end
+  end
+end
